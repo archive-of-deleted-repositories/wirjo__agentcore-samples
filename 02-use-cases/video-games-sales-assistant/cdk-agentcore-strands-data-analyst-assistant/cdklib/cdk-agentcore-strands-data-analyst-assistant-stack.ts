@@ -1,3 +1,16 @@
+/**
+ * CDK Stack for AgentCore Strands Data Analyst Assistant
+ * 
+ * Infrastructure for a data analyst assistant powered by Amazon Bedrock AgentCore.
+ * Components:
+ * - Aurora PostgreSQL database containing video games sales data
+ * - DynamoDB tables for query results
+ * - VPC with networking and security configuration
+ * - IAM roles and permissions for AgentCore
+ * - S3 bucket for data imports
+ * - SSM parameters for configuration
+ */
+
 import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
@@ -7,23 +20,33 @@ import * as iam from "aws-cdk-lib/aws-iam";
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 
-export class CdkAgentCoreStrandsDataAnalystAssistantStack extends cdk.Stack {
+export class CdkAgentcoreStrandsDataAnalystAssistantStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
+    // ================================
+    // STACK PARAMETERS
+    // ================================
+
+    // Project identifier used in resource naming
     const projectId = new cdk.CfnParameter(this, "ProjectId", {
       type: "String",
       description: "Project identifier used for naming resources",
       default: "agentcore-data-analyst-assistant",
     });
 
+    // Name of the Aurora PostgreSQL database
     const databaseName = new cdk.CfnParameter(this, "DatabaseName", {
       type: "String",
       description: "The database name",
       default: "video_games_sales",
     });
 
-    // Create the DynamoDB table for raw query results
+    // ================================
+    // DYNAMODB TABLES
+    // ================================
+
+    // DynamoDB table containing SQL query results from the agent
     const rawQueryResults = new dynamodb.Table(this, "RawQueryResults", {
       partitionKey: {
         name: "id",
@@ -38,21 +61,11 @@ export class CdkAgentCoreStrandsDataAnalystAssistantStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY
     });
 
-    // Create the agent interactions table
-    const agentInteractionsTable = new dynamodb.Table(this, 'AgentInteractions', {
-      partitionKey: {
-        name: 'session_id',
-        type: dynamodb.AttributeType.STRING
-      },
-      sortKey: {
-        name: "message_id",
-        type: dynamodb.AttributeType.NUMBER,
-      },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      encryption: dynamodb.TableEncryption.AWS_MANAGED,
-      removalPolicy: cdk.RemovalPolicy.DESTROY
-    });
+    // ================================
+    // VPC AND NETWORKING
+    // ================================
 
+    // VPC containing public and private subnets for secure database access
     const vpc = new ec2.Vpc(this, "AssistantVPC", {
       vpcName: `${projectId.valueAsString}-vpc`,
       ipAddresses: ec2.IpAddresses.cidr("10.0.0.0/21"),
@@ -72,7 +85,7 @@ export class CdkAgentCoreStrandsDataAnalystAssistantStack extends cdk.Stack {
       ],
     });
 
-    // Keep only gateway endpoints, removing all interface endpoints
+    // Gateway endpoints providing cost-effective access to AWS services
     vpc.addGatewayEndpoint("S3Endpoint", {
       service: ec2.GatewayVpcEndpointAwsService.S3,
       subnets: [{ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }],
@@ -83,8 +96,11 @@ export class CdkAgentCoreStrandsDataAnalystAssistantStack extends cdk.Stack {
       subnets: [{ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }],
     });
 
-    // Security group for the database cluster
-    // Since we're using RDS Data API, we don't need direct TCP access to the database
+    // ================================
+    // DATABASE INFRASTRUCTURE
+    // ================================
+
+    // Security group controlling access to Aurora PostgreSQL cluster (via RDS Data API)
     const sg_db = new ec2.SecurityGroup(
       this,
       "AssistantDBSecurityGroup",
@@ -95,24 +111,22 @@ export class CdkAgentCoreStrandsDataAnalystAssistantStack extends cdk.Stack {
       }
     );
 
-    // No need for direct PostgreSQL port access when using RDS Data API
-    // The Data API service will handle the connection to the database
-
+    // Database credentials stored in AWS Secrets Manager
     const databaseUsername = "postgres";
-
     const secret = new rds.DatabaseSecret(this, "AssistantSecret", {
       username: databaseUsername,
       secretName: `${projectId.valueAsString}-db-secret`,
     });
 
-    // Create IAM role for Aurora to access S3
+    // IAM role enabling Aurora S3 access for data imports
     const auroraS3Role = new iam.Role(this, "AuroraS3Role", {
       assumedBy: new iam.ServicePrincipal("rds.amazonaws.com"),
     });
 
+    // Aurora PostgreSQL Serverless v2 cluster containing video games sales data
     let cluster = new rds.DatabaseCluster(this, "AssistantCluster", {
       engine: rds.DatabaseClusterEngine.auroraPostgres({
-        version: rds.AuroraPostgresEngineVersion.VER_15_4,
+        version: rds.AuroraPostgresEngineVersion.VER_17_4,
       }),
       writer: rds.ClusterInstance.serverlessV2("writer"),
       serverlessV2MinCapacity: 2,
@@ -130,7 +144,11 @@ export class CdkAgentCoreStrandsDataAnalystAssistantStack extends cdk.Stack {
       storageEncrypted: true, // Ensure storage encryption
     });
 
-    // Now that we have created all the resources, we can create the AgentCoreMyRole with the correct permissions
+    // ================================
+    // AGENTCORE IAM ROLE & PERMISSIONS
+    // ================================
+
+    // IAM role with comprehensive permissions for Amazon Bedrock AgentCore
     const agentCoreRole = new iam.Role(this, 'AgentCoreMyRole', {
       roleName: `AgentCoreExecution-${projectId.valueAsString}-${this.region}`,
       assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
@@ -141,8 +159,13 @@ export class CdkAgentCoreStrandsDataAnalystAssistantStack extends cdk.Stack {
               sid: 'ECRImageAccess',
               effect: iam.Effect.ALLOW,
               actions: [
+                'ecr:BatchCheckLayerAvailability',
                 'ecr:BatchGetImage',
-                'ecr:GetDownloadUrlForLayer'
+                'ecr:GetDownloadUrlForLayer',
+                'ecr:PutImage',
+                'ecr:InitiateLayerUpload',
+                'ecr:UploadLayerPart',
+                'ecr:CompleteLayerUpload',
               ],
               resources: [
                 `arn:aws:ecr:${this.region}:${this.account}:repository/*`
@@ -277,8 +300,7 @@ export class CdkAgentCoreStrandsDataAnalystAssistantStack extends cdk.Stack {
                 'dynamodb:UpdateItem'
               ],
               resources: [
-                rawQueryResults.tableArn,
-                agentInteractionsTable.tableArn
+                rawQueryResults.tableArn
               ]
             }),
             // Permissions for AgentCore Memory
@@ -350,7 +372,7 @@ export class CdkAgentCoreStrandsDataAnalystAssistantStack extends cdk.Stack {
       })
     );
 
-    // Add additional RDS permissions similar to your CloudFormation template
+    // Add additional RDS permissions
     auroraS3Role.addToPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
@@ -366,7 +388,11 @@ export class CdkAgentCoreStrandsDataAnalystAssistantStack extends cdk.Stack {
       })
     );
 
-    // S3 bucket for temporal resources to use with aws_s3.table_import_from_s3
+    // ================================
+    // S3 STORAGE
+    // ================================
+
+    // S3 bucket containing data for import into Aurora PostgreSQL
     const importBucket = new s3.Bucket(this, "ImportBucket", {
       bucketName: `${projectId.valueAsString}-${this.region}-${this.account}-import`,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
@@ -378,21 +404,11 @@ export class CdkAgentCoreStrandsDataAnalystAssistantStack extends cdk.Stack {
       ],
     });
 
-    // SSM Parameters
-    new ssm.CfnParameter(this, 'AgentInteractionsTableNameParam', {
-      name: `/${projectId.valueAsString}/AGENT_INTERACTIONS_TABLE_NAME`,
-      value: agentInteractionsTable.tableName,
-      description: 'DynamoDB agent interactions table name',
-      type: 'String'
-    });
+    // ================================
+    // SSM PARAMETERS
+    // ================================
 
-    new ssm.CfnParameter(this, 'AwsRegionParam', {
-      name: `/${projectId.valueAsString}/AWS_REGION`,
-      value: this.region,
-      description: 'AWS region',
-      type: 'String'
-    });
-
+    // SSM parameters containing AgentCore runtime configuration
     new ssm.CfnParameter(this, 'SecretArnParam', {
       name: `/${projectId.valueAsString}/SECRET_ARN`,
       value: secret.secretArn,
@@ -435,8 +451,11 @@ export class CdkAgentCoreStrandsDataAnalystAssistantStack extends cdk.Stack {
       type: 'String'
     });
 
-    // Stack outputs
+    // ================================
+    // CLOUDFORMATION OUTPUTS
+    // ================================
 
+    // Aurora database cluster ARN
     new cdk.CfnOutput(this, "AuroraServerlessDBClusterARN", {
       value: cluster.clusterArn,
       description: "The ARN of the Aurora Serverless DB Cluster",
@@ -448,7 +467,7 @@ export class CdkAgentCoreStrandsDataAnalystAssistantStack extends cdk.Stack {
       description: "The ARN of the database credentials secret",
       exportName: `${projectId.valueAsString}-SecretArn`,
     });
-  
+
     new cdk.CfnOutput(this, "DataSourceBucketName", {
       value: importBucket.bucketName,
       description:
@@ -462,22 +481,18 @@ export class CdkAgentCoreStrandsDataAnalystAssistantStack extends cdk.Stack {
       exportName: `${projectId.valueAsString}-QuestionAnswersTableName`,
     });
 
-    new cdk.CfnOutput(this, "AgentInteractionsTableName", {
-      value: agentInteractionsTable.tableName,
-      description: "The name of the DynamoDB agent interactions table",
-      exportName: `${projectId.valueAsString}-AgentInteractionsTableName`,
-    });
-    
     new cdk.CfnOutput(this, "AgentCoreMyRoleARN", {
       value: agentCoreRole.roleArn,
       description: "The ARN of the AgentCoreMyRole",
       exportName: `${projectId.valueAsString}-AgentCoreMyRoleARN`,
     });
-    
+
     new cdk.CfnOutput(this, "MemoryIdSSMParameter", {
       value: `/${projectId.valueAsString}/MEMORY_ID`,
       description: "The SSM parameter name for the memory ID",
       exportName: `${projectId.valueAsString}-MemoryIdSSMParameter`,
     });
+
+
   }
 }
